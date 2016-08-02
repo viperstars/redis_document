@@ -1,6 +1,6 @@
 # redis_document
 
-redis 文档，基于 redis 2.8，配置文件等，个人翻译和总结
+redis 文档，基于 redis 2.8，个人翻译和总结
 
 1. redis_document.txt, 官方文档翻译
 2. redis.conf，配置文件注释
