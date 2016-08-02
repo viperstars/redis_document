@@ -1,0 +1,91 @@
+1，安装go语言环境
+wget http://www.golangtc.com/static/go/go1.4.2.linux-amd64.tar.gz
+tar xf go1.4.2.linux-amd64.tar.gz
+mv go /usr/local/
+
+配置环境变量
+vim /etc/profile.d/go.sh
+export GOROOT=/usr/local/go
+export PATH=$PATH:$GOROOT/bin
+export GOPATH=/usr/local/codis
+
+2，安装zookeeper
+wget http://mirrors.cnnic.cn/apache/zookeeper/zookeeper-3.4.6/zookeeper-3.4.6.tar.gz
+tar xf zookeeper-3.4.6.tar.gz
+mv zookeeper-3.4.6 /usr/local/zookeeper
+
+新建数据和日志目录
+mkdir /usr/local/zookeeper/{data,logs}
+
+修改dataDir和日志文件
+cd /opt/local/zookeeper/conf/
+cp zoo_sample.cfg zoo.cfg
+
+vim zoo.cfg
+dataDir=/opt/local/zookeeper/data
+dataLogDir=/opt/local/zookeeper/logs
+
+启动zookeeper
+/usr/local/zookeeper/bin/zkServer.sh start
+
+3，安装codis
+go get -d github.com/wandoulabs/codis
+cd $GOPATH/src/github.com/wandoulabs/codis
+./bootstrap.sh
+make gotest
+
+启动codis
+./sample/startall.sh
+
+启动过程详解
+1，启动dashboard
+nohup ../bin/codis-config -c config.ini -L ./log/dashboard.log dashboard --addr=:18087 --http-log=./log/requests.log &>/dev/null &
+
+2，启动redis服务
+nohup ../bin/codis-server ./redis_conf/6381.conf &> ./log/redis_6381.log &
+nohup ../bin/codis-server ./redis_conf/6382.conf &> ./log/redis_6382.log &
+
+3，将redis服务加入对应组内
+../bin/codis-config -c config.ini -L ./log/cconfig.log server add 1 localhost:6381 master
+../bin/codis-config -c config.ini -L ./log/cconfig.log server add 2 localhost:6382 master
+
+4，初始化slot并分配slot
+../bin/codis-config -c config.ini slot init -f
+../bin/codis-config -c  config.ini slot range-set 0 511 1 online
+../bin/codis-config -c  config.ini slot range-set 512 1023 2 online
+
+5，确保proxy_1已下线后重新启动proxy_1
+../bin/codis-config -c config.ini proxy offline proxy_1
+nohup ../bin/codis-proxy --log-level info -c config.ini -L ./log/proxy.log  --cpu=8 --addr=0.0.0.0:19000 --http-addr=0.0.0.0:11000 &
+
+6，使proxy_1上线
+../bin/codis-config -c config.ini proxy online proxy_1
+
+config.ini内容
+zk=localhost:2181 #zookeeper的地址，如果是zookeeper集群，可以这么写: zk=hostname1:2181, hostname2:2181, hostname3:2181, hostname4:2181, hostname5:2181 如果是etcd，则写成 http://hostname1:port, http://hostname2:port, http://hostname3:port
+product=test #名称，codis集群的名称，可以认为是命名空间，不同命名空间的codis没有交集
+proxy_id=proxy_1 #用于标记此配置适用的proxy，在有多个proxy的情况，可以使用不同的config.ini，只需要更改proxy_id即可
+dashboard_addr=localhost:18087   #dashboard 服务的地址，CLI 的所有命令都依赖于 dashboard 的 RESTful API，所以必须启动
+coordinator=zookeeper  #如果用etcd，则将zookeeper替换为etcd
+
+数据迁移
+在codis-config管理工具中，每次迁移任务的最小单位是slot
+如：将slot id为 [0-511] 的数据迁移到server group 2上，--delay参数表示每迁移一个key后sleep的毫秒数，默认是0，用于限速
+../bin/codis-config slot migrate 0 511 2 --delay=10
+
+Auto Rebalance
+codis支持动态的根据实例内存，自动对slot进行迁移, 以均衡数据分布
+$ ../bin/codis-config slot rebalance
+
+要求:
+所有的codis-server都必须设置了maxmemory参数
+所有的slots都应该处于online状态，即没有迁移任务正在执行
+所有server group都必须有Master
+
+codis不支持的命令列表
+KEYS, MOVE, OBJECT, RENAME, RENAMENX, SORT, SCAN, BITOP,MSETNX, BLPOP, BRPOP, BRPOPLPUSH, PSUBSCRIBE，PUBLISH, PUNSUBSCRIBE, SUBSCRIBE, UNSUBSCRIBE, DISCARD, EXEC, MULTI, UNWATCH, WATCH, SCRIPT EXISTS, SCRIPT FLUSH, SCRIPT KILL, SCRIPT LOAD, AUTH, ECHO, SELECT, BGREWRITEAOF, BGSAVE, CLIENT KILL, CLIENT LIST, CONFIG GET, CONFIG SET, CONFIG RESETSTAT, DBSIZE, DEBUG OBJECT, DEBUG SEGFAULT, FLUSHALL, FLUSHDB, INFO, LASTSAVE, MONITOR, SAVE, SHUTDOWN, SLAVEOF, SLOWLOG, SYNC, TIME
+
+如果使用以上命令服务器会自动关闭此次请求，错误提示如下：
+Error: Server closed the connection
+
+

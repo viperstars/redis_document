@@ -1,0 +1,228 @@
+1. 概览
+
+1.1 特性
+所有数据都在内存中
+五种数据结构：String/Hash/List/Set/Ordered Set
+数据过期时间支持
+不完全的事务支持
+服务端脚本：使用Lua Script编写，类似存储过程的作用
+PubSub：消息一对多发布订阅功能
+持久化：支持定期导出内存的Snapshot与记录写操作日志的Append Only File两种模式
+Replication：Master-Slave模式，Master可连接多个只读Slave
+Fail-Over：Redis-Sentinel节点负责监控Master节点，在master失效时提升slave，实现fail-over
+动态配置：所有参数可用命令行动态配置不需重启，并重新写回配置文件中
+
+1.2 优缺点
+非常非常的快，有测评说比Memcached还快，读写都非常的快，所有API都差不多快
+丰富的数据结构，超越了一般的Key-Value数据库而被认为是一个数据结构服务器
+因为是个人作品，Redis目前只有2.3万行代码，Keep it simple。
+
+2. 数据结构
+
+2.1 Key
+Key不能太长，比如1024字节，但也不要太短如”u:1000:pwd”，要表达清楚意思才好。建议用”:”分隔域，用”.”作为单词间的连接，如”comment:1234:reply.to”。
+Keys，返回匹配的key，支持通配符如“keys a*”、“keys a?c”，但不建议在生产环境大数据量下使用。
+Sort，对集合按数字或字母顺序排序后返回或另存为list，还可以关联到外部key等。因为复杂度是最高的O(N+M*log(M))(N是集合大小，M为返回元素的数量)，有时会安排到slave上执行。
+Expire/ExpireAt/Persist/TTL，关于Key超时的操作。默认以秒为单位。
+
+2.2 String
+最普通的key-value类型，说是String，其实是任意的byte，比如图片，最大512M。 所有常用命令的复杂度都是O(1)，普通的Get/Set方法，可以用来做Cache，存Session，为了简化架构甚至可以替换掉Memcached。
+Incr/IncrBy/IncrByFloat/Decr/DecrBy，可以用来做计数器，做自增序列。key不存在时会创建并设原值为0。IncrByFloat专门针对float。
+SetNx， 仅当key不存在时才Set。
+其他Set指令：
+SetEx， Set + Expire 的简便写法，p字头版本以毫秒为单位。
+GetSet， 设置新值，返回旧值。比如一个按小时计算的计数器，可以用GetSet获取计数并重置为0。
+MGet/MSet/MSetNx， 一次get/set多个key。
+2.6.12版开始，Set命令已融合了Set/SetNx/SetEx三者，SetNx与SetEx可能会被废弃。
+GetBit/SetBit/BitOp，与或非/BitCount，比如统计今天的独立访问用户数时，每个注册用户都有一个offset，他今天访问话就把他的bit设为1，用BitCount就可以得出今天的总人数。
+Append/SetRange/GetRange/StrLen，对文本进行扩展、替换、截取和求长度。
+
+2.3 Hash
+Key-HashMap结构，相比String类型将这整个对象持久化成JSON格式，Hash将对象的各个属性存入Map里，可以只读取/更新对象的某些属性。
+另一个用法是建索引。比如User对象，除了id有时还要按name来查询。可以有如下的数据记录:
+(String) user:101 -> {“id”:101,”name”:”calvin”…}
+(String) user:102 -> {“id”:102,”name”:”kevin”…}
+(Hash) user:index-> “calvin”->101, “kevin” -> 102
+底层实现是hash table，一般操作复杂度是O(1)，要同时操作多个field时就是O(N)，N是field的数量。
+
+2.4 List
+List是一个双向链表，支持双向的Pop/Push，一般从左端Push，右端Pop——LPush/RPop，而且还有Blocking的版本BLPop/BRPop，客户端可以阻塞直到有消息到来，所有操作都是O(1)，可以当Message Queue来用。当多个Client并发阻塞等待，有消息入列时谁先被阻塞谁先被服务。
+还有RPopLPush/ BRPopLPush，弹出来返回给client的同时，把自己又推入另一个list，LLen获取列表的长度。
+还有按值进行的操作：LRem(按值删除元素)、LInsert(插在某个值的元素的前后)，复杂度是O(N)，N是List长度，因为List的值不唯一，所以要遍历全部元素，而Set只要O(log(N))。
+按下标进行的操作：下标从0开始，队列从左到右算，下标为负数时则从右到左。
+LSet ，按下标设置元素值。
+LIndex，按下标返回元素。
+LRange，不同于POP直接弹走元素，只是返回列表内一段下标的元素。
+LTrim，限制List的大小，比如只保留最新的20条消息。
+复杂度也是O(N)，其中LSet的N是List长度，LIndex的N是下标的值，LRange的N是start的值+列出元素的个数，因为是链表而不是数组，所以按下标访问其实要遍历链表，除非下标正好是队头和队尾。LTrim的N是移除元素的个数。
+
+2.5 Set
+Set就是Set，可以将重复的元素随便放入而Set会自动去重，底层实现也是hash table。
+SAdd/SRem/SIsMember/SCard/SMove/SMembers，各种标准操作。除了SMembers都是O(1)。
+SInter/SInterStore/SUnion/SUnionStore/SDiff/SDiffStore，各种集合操作。交集运算可以用来显示在线好友(在线用户、交集、好友列表)，共同关注(两个用户的关注列表的交集)。O(N)，并集和差集的N是集合大小之和，交集的N是小的那个集合的大小*2。
+
+2.6 Sorted Set
+有序集，元素放入集合时还要提供该元素的分数。
+ZRange/ZRevRange，按排名的上下限返回元素，正数与倒数。
+ZRangeByScore/ZRevRangeByScore，按分数的上下限返回元素，正数与倒数。
+ZRemRangeByRank/ZRemRangeByScore，按排名/按分数的上下限删除元素。
+ZCount，统计分数上下限之间的元素个数。
+ZRank/ZRevRank ，显示某个元素的正倒序的排名。
+ZScore/ZIncrby，显示元素的分数/增加元素的分数。
+ZAdd(Add)/ZRem(Remove)/ZCard(Count)，ZInsertStore(交集)/ZUnionStore(并集)，Set操作，与正牌Set相比，少了IsMember和差集运算。
+Sorted Set的实现是hash table(element->score，用于实现ZScore及判断element是否在集合内)，和skip list(score->element，按score排序)的混合体。 
+ZAdd/ZRem是O(log(N))，ZRangeByScore/ZRemRangeByScore是O(log(N)+M)，N是Set大小，M是结果/操作元素的个数。
+
+2.7 事务
+用Multi(Start Transaction)、Exec(Commit)、Discard(Rollback)实现。 在事务提交前，不会执行任何指令，只会把它们存到一个队列里，不影响其他客户端的操作。在事务提交时，批量执行所有指令。
+注意，Redis里的事务，与我们平时的事务概念很不一样：
+它仅仅是保证事务里的操作会被连续独占的执行。因为是单线程架构，在执行完事务内所有指令前是不可能再去同时执行其他客户端的请求的。
+它没有隔离级别的概念，因为事务提交前任何指令都不会被实际执行，也就不存在”事务内的查询要看到事务里的更新，在事务外查询不能看到”这个问题。
+它不保证原子性，所有指令同时成功或同时失败，只有决定是否开始执行全部指令的能力，没有执行到一半进行回滚的能力。在redis里失 败分两种，一种是明显的指令错误，比如指令名拼错，指令参数个数不对，在2.6版中全部指令都不会执行。另一种是隐含的，比如在事务里，第一句是SET foo bar， 第二句是LLEN foo，对第一句产生的String类型的key执行LLEN会失败，但这种错误只有在指令运行后才能发现，这时候第一句成功，第二句失败。还有，如果事务执行到一半redis被Kill，已经执行的指令同样也不会被回滚。
+Watch指令，类似乐观锁，事务提交时，如果Key的值已被别的客户端改变，比如某个list已被别的客户端push/pop过了，整个事务队列都不会被执行。
+
+2.8 Lua Script
+Redis2.6内置的Lua Script支持，可以在Redis的Server端一次过运行大量逻辑，就像存储过程一样，避免了海量中间数据在网路上的传输。
+Lua自称是在Script语言里关于快的标准，Redis选择了它而不是流行的JavaScript。
+因为Redis的单线程架构，整个Script默认是在一个事务里的。
+Script里涉及的所有Key尽量用变量，从外面传入，使Redis一开始就知道你要改变哪些key。
+Eval每次传输一整段Script比较费带宽，可以先用Script Load载入script，返回哈希值。然后用EvalHash执行。因为就是SHA-1，所以任何时候执行返回的哈希值都是一样的。
+内置的Lua库里还带了CJSON，可以处理json字符串。
+ 
+2.9 过期数据清除
+过期数据的清除并不容易，为每一条key设置一个timer，到点立刻删除的消耗太大，每秒遍历所有数据消耗也大，Redis使用了一种相对务实的做法： 当client主动访问key会先对key进行超时判断，过时的key会立刻删除。 如果clien永远都不再get那条key呢？ 它会在Master的后台，每秒10次的执行如下操作： 随机选取100个key校验是否过期，如果有25个以上的key过期了，立刻额外随机选取下100个key(不计算在10次之内)。可见如果过期的 key不多，它最多每秒回收200条左右，如果有超过25%的key过期了，它就会做得更多，但只要key不被主动get，它占用的内存什么时候最终被清理掉并不明确
+
+3. 性能
+ 
+3.1 为什么快
+纯ANSI C编写。
+不依赖第三方类库，没有像memcached那样使用libevent，因为libevent迎合通用性而造成代码庞大，所以作者用libevent中两个文件修改实现了自己的epoll event loop。
+原因之二是Redis多样的数据结构，每种结构只做自己擅长做的事，当然比数据库只有Table，MongogoDB只有JSON一种结构快。
+
+3.2 性能调优
+正视网络往返时间：
+1.MSet/LPush/ZAdd等都支持一次输入多个Key。
+2.PipeLining模式 可以一次输入多个指令。
+3.更快的是Lua Script模式，还可以包含逻辑，直接在服务端执行一系列操作。
+发现执行缓慢的命令，可配置执行超过多少时间的指令算是缓慢指令(默认10毫秒，不含IO时间)，可以用slowlog get 指令查看(默认只保留最后的128条)。
+CPU也是瓶颈之一。
+持久化对性能的影响很大。
+要熟悉各指令的复杂度，不过只要不是O(N)一个超大集合，都不用太担心。
+
+4. 容量
+
+4.1 最大内存
+所有的数据都必须在内存中，原来2.0版的VM策略(将Value放到磁盘，Key仍然放在内存)，2.4版后又不支持了。
+一定要设置最大内存，否则物理内存用尽了就会大量使用Swap，写RDB文件时的速度会降得很慢。
+多留一倍内存是最安全的。重写AOF文件和RDB文件的进程(即使不做持久化，复制到Slave的时候也要写RDB)会fork出一条新进程来，采用了操作系统的Copy-On-Write策略(子进程与父进程共享Page。如果父进程的Page-每页4K有修改，父进程自己创建那个 Page的副本，不会影响到子进程)。留意日志，如”RDB: 1215 MB of memory used by copy-on-write”。在系统极度繁忙时，如果父进程的所有Page在子进程写RDB过程中都被修改过了，就需要两倍内存。
+按照Redis启动时的提醒，设置 vm.overcommit_memory = 1 ，使得fork()一条10G的进程时，因为COW策略而不一定需要有10G的free memory。
+其他需要考虑的内存包括：
+1.AOF rewrite过程中对新写入命令的缓存(rewrite结束后会merge到新的aof文件)，留意”Background AOF buffer size: 80 MB”的字样。
+2.负责与Slave同步的Client的缓存，默认设置master需要为每个slave预留不高于256M的缓存。
+当最大内存到达时，按照配置的Policy进行处理， 默认策略为volatile-lru，对设置了expire time的key进行LRU清除(不是按实际expire time)。如果沒有数据设置了expire time或者policy为noeviction，则直接报错，但此时系统仍支持get之类的读操作。 另外还有几种policy，比如volatile-ttl按最接近expire time的，allkeys-lru对所有key都做LRU。
+
+4.2 内存占用
+使用jemalloc分配内存，删除数据后，内存并归还至操作系统而是被Redis留下来重用到新的数据上，直到Redis重启。因此进程实际占用内存是看INFO里返回的used_memory_peak_human。
+Redis内部用了ziplist/intset这样的压缩结构来减少hash/list/set/zset的存储，默认当集合的元素少于512个且最长那个值不超过64字节时使用，可配置。
+
+5. 高可用性
+
+5.1 持久化
+正确关闭服务器：redis-cli shutdown或者kill，都会graceful shutdown，保证写RDB文件以及将AOF文件fsync到磁盘，不会丢失数据。 如果是Ctrl+C，或者kill -9就可能丢失。
+
+5.1.1 RDB文件
+RDB是整个内存的压缩过的Snapshot，RDB的数据结构，可以配置复合的快照触发条件，默认是1分钟内改了1万次，或5分钟内改了10次，或15分钟内改了1次。
+RDB写入时，会连内存一起Fork出一个新进程，遍历新进程内存中的数据写文件，这样就解决了些Snapshot过程中又有新的写入请求进来的问题。
+RDB会先写到临时文件，完了再重命名，这样外部程序对RDB文件的备份和传输过程是安全的。而且即使写新快照的过程中Server被强制关掉了，旧的RDB文件还在。
+可配置是否进行压缩，压缩方法是字符串的LZF算法，以及将string形式的数字变回int形式存储。
+动态所有停止RDB保存规则的方法：redis-cli config set save “”
+
+5.1.2 AOF文件
+操作日志，记录所有有效的写操作，类似mysql的binlog，格式就是明文的Redis协议的纯文本文件。
+一般配置成每秒调用一次fdatasync将kernel的文件缓存刷到磁盘。当操作系统非正常关机时，文件可能会丢失不超过2秒的数据 。 如果设为fsync always，性能较差不用考虑。如果设为no，依赖操作系统自己的sync，Linux系统一般30秒一次。
+AOF文件持续增长而过大时，会fork出一条新进程来将文件重写(也是先写临时文件，最后再重命名)， 遍历新进程的内存中数据，每条记录有一条的Set语句。默认配置是当AOF文件大小是上次rewrite后大小的一倍，且文件大于64M时触发。
+Redis协议， 如set mykey hello， 将持久化成*3 $3 set $5 mykey $5 hello， 第一个数字代表这条语句有多少元，其他的数字代表后面字符串的长度。这样的设计，使得即使在写文件过程中突然关机导致文件不完整，也能自我修复，使用redis-check-aof即可。
+综上所述，RDB的数据不实时，同时使用两者时服务器重启也只会找AOF文件。那只使用AOF呢？作者建议不要，因为RDB更适合用于备份数据库(AOF在不断变化不好备份)，快速重启，而且不会有AOF可能潜在的bug。
+
+5.1.3 读写性能
+AOF重写和RDB写入都是在fork出新进程后，遍历新进程的内存顺序写的，既不阻塞主进程继续处理客户端请求，顺序写的速度也比随机写快。Fork一个使用了大量内存的进程也要时间，大约10ms每GB的样子。
+在bgrewriteaof过程中，所有新来的写入请求依然会被写入旧的AOF文件，同时放到buffer中，当rewrite完成后， 会在主线程把这部分内容合并到临时文件中之后才rename成新的AOF文件，所以rewrite过程中会不断打印”Background AOF buffer size: 80 MB， Background AOF buffer size: 180 MB”，计算系统容量时要留意这部分的内存消耗。注意，这个合并的过程是阻塞的，如果你产生了280MB的buffer，在100MB/s的传统硬盘 上，Redis就要阻塞2.8秒。
+bgsave和bgaofrewrite不会被同时执行，如果bgsave正在执行，bgaofrewrite会自动延后。
+2.4版以后，写入AOF时的fdatasync由另一条线程来执行，不会再阻塞主线程。
+2.4版以后，lpush/zadd可以输入一次多个值了，使得AOF重写时可以将旧版本中的多个lpush/zadd指令合成一个。
+
+5.1.4 性能调整
+因为RDB文件只用作后备用途，建议只在Slave上持久化RDB文件，而且只要15分钟备份一次就够了，只保留save 900 1这条规则。
+如果Enalbe AOF，好处是在最恶劣情况下也只会丢失不超过两秒数据，启动脚本较简单只load自己的AOF文件就可以了。代价一是带来了持续的I/O，二是AOF rewrite的最后将rewrite过程中产生的新数据写到新文件造成的阻塞几乎是不可避免的。只要硬盘许可，应该尽量减少AOF rewrite的频率，AOF重写的基础大小默认值64M太小了，可以设到5G以上。
+如果不Enable AOF ，仅靠Master-Slave Replication实现高可用性也可以。能避免I/O也减少了rewrite时带来的性能消耗。代价是如果Master/Slave同时挂掉，会丢失十几分钟的数据，启动脚本也要比较两个Master/Slave中的RDB文件，载入较新的。
+
+5.2 Master-Slave复制
+
+5.2.1 概述
+slave可以在配置文件、启动命令行参数、以及redis-cli执行SlaveOf指令来设置自己是Slave。
+同步延时非常小，指令一旦执行完毕就会立刻写AOF文件和向Slave转发，除非Slave自己被阻塞。
+即使在配置文件里设了slavof，slave启动时依然会先从数据文件载入一堆的数据，再去执行slaveof。“Slaveof no one”会使slave变为master。
+2.8版本将支持PSYNC部分同步，master会拨出一小段内存来存放要发给slave的指令，如果slave短暂的断开了，重连时会从内存中读取需要补读的指令，这样就不需要断开两秒也进行全同步了。但如果断开时间较长，已经超过了内存中保存的数据，还是要全同步。
+
+5.2.2 slaveof执行过程
+先执行一次全同步： 请求master BgSave出自己的一个RDB Snapshot文件发给slave，slave接收完毕后，清除掉自己的旧数据，然后将RDB载入内存。
+再进行增量同步： master作为一个普通的client连入slave，将所有写操作转发给slave，没有特殊的同步协议。
+
+5.3 Fail-Over
+Redis-sentinel是2.6版开始加入的另一组独立运行的节点，提供自动Fail Over的支持。
+
+5.3.1 主要执行过程
+Sentinel每秒钟对所有master，slave和其他sentinel执行Ping，redis-server节点要应答+PONG或-LOADING或-MASTERDOWN.
+如果某一台Sentinel没有在30秒内收到上述正确应答，它就会认为master处于sdown状态(主观Down)
+它向其他sentinel询问是否也认为该master挂了（SENTINEL is-master-down-by-addr ）， 如果quorum台(默认是2)sentinel在5秒钟内都这样认为，就会认为master是odown了(客观Down)。
+此时会选出一台sentinel作为Leader执行fail-over，Leader会从slave中选出一个提升为master(执行slaveof no one)，然后让其他slave指向它(执行slaveof new master)。
+
+5.3.2 master/slave 及其他sentinel的发现
+master地址在sentinel.conf里，sentinel会每10秒一次向master发送INFO，知道master的slave有哪些。 如果master已经变为slave，sentinel会分析INFO的应答指向新的master。
+另外，sentinel会在master上建一个pub/sub channel，名为”sentinel:hello”，通告各种信息，sentinel们也是通过接收pub/sub channel上的sentinel的信息发现彼此，因为每台sentinel每5秒会发送一次自己的host信息宣告自己的存在。
+
+5.3.3 自定义reconfig脚本
+sentinel在failover时还会执行配置文件里指定的用户自定义reconfig脚本，做用户自己定义需要的操作，比如让master变为slave并指向新的master。
+脚本的将会在命令行按顺序传入如下参数： <master-name> <role(leader/observer)> <state(上述三种情况)> <from-ip> <from-port> <to-ip> <to-port>
+脚本返回0是正常，如果返回1会被重新执行，如果返回2或以上不会。 如果超过60秒没返回会被强制终止。
+
+6. 运维
+
+6.1 安装
+需要自己编译，可利用utils中的install_server.sh与redis_init_script。
+但RHEL下设定script runlevel的方式不一样，redis_init_script中要增加一句“# chkconfig: 345 90 10″ ，而install_server.sh可以删掉后面的那句“chkconfig –level 345 redis”
+
+6.2 部署模型
+Redis只能使用单线程，为了提高CPU利用率，有提议在同一台服务器上启动多个Redis实例，但这会带来严重的I/O争用，除非Redis不需要持久化，或者有某种方式保证多个实例不会在同一个时间重写AOF。一组sentinel能同时监控多个Master。
+有提议说环形的slave结构，即master只连一个slave，然后slave再连slave，此部署有两个前提，一是有大量的只读需求需要在slave完成，二是对slave传递时的数据不一致性不敏感。
+
+6.3 配置
+约30个配置项，全都有默认配置
+
+6.3.1 三种方式
+可以配置文件中编写。
+可以在启动时的命令行配置，redis-server –port 7777 –slaveof 127.0.0.1 8888。
+也可以用redis-cli执行Config Set修改所有的参数，达到不重启服务而修改参数的效果，而且在新版本里还可以执行Config Rewrite将改动写回到文件中，可能会破坏掉原来的文件的排版，注释。
+
+6.3.2 安全保护
+在配置文件里设置密码：requirepass foobar。
+禁止某些危险命令，例如FlushDB，将它rename为空：rename-command FLUSHDB '' 。
+
+6.4 监控与维护
+
+6.4.1 监控指令
+Info指令将返回非常丰富的信息。 着重监控检查内存使用是否已接近上限，used_memory是Redis申请的内存，used_memory_rss是操作系统分配给Redis的物理内存，两者之间隔着碎片，隔着Swap。 还有重点监控 AOF与RDB文件的保存情况，以及master-slave的关系。Statistics信息还包括key命中率，所有命令的执行次数，所有client连接数量等， CONFIG RESETSTAT可重置为0。
+Monitor指令可以显示Server收到的所有指令，主要用于debug，影响性能，生产环境慎用。
+SlowLog检查慢操作。
+
+6.4.2 日志级别
+日志可以动态的设置成verbose/debug模式来输出更多的信息。指令为config set loglevel verbose。
+
+6.4.3 持久化文件维护
+如果AOF文件在写入过程中崩溃，可以用redis-check-aof修复。
+如果AOF rewrite和 RDB snapshot的过程中崩溃，会留下无用的临时文件，需要定期扫描删除。
+
+7. client
+7.1 Redis对Client端连接的处理
+Redis默认最大连接数是10000。
+Redis默认不对Client做Timeout处理，可以用timeout项配置，但即使配置了也不会非常精确。

@@ -1,0 +1,279 @@
+redis的所有issues
+https://github.com/antirez/redis/issues
+
+redis的所有critical bugs
+https://github.com/antirez/redis/issues?q=is%3Aopen+is%3Aissue+label%3A%22critical+bug%22
+
+1，带有检测key是否存在的Lua脚本在复制场景中使用可能会有bug
+if redis.call("exists",KEYS[1]) == 1
+then
+    redis.call("incr","mycounter")
+end
+
+if redis.call("exists",KEYS[1]) == 1
+then
+    return redis.call("incr","mycounter")
+end
+类似以上的Lua脚本，在检测到key存在之后将其增加1的操作在master和slave上执行的结果是不同的
+如果master第一次检测到key存在并且将其加1之后，第二次检测时key可能会不存在，这样会导致key的值仅增加了一次
+副作用是master会发送del命令到从服务器使key超时，所以当脚本在slave上执行时，key的值没有增加
+
+2，在指定了copy选项后，del命令是否会复制到slave
+if (!copy) {
+    /* No COPY option: remove the local key, signal the change. */
+    dbDelete(c->db,c->argv[3]);
+    signalModifiedKey(c->db,c->argv[3]);
+}
+addReply(c,shared.ok);
+server.dirty++;
+
+/* Translate MIGRATE as DEL for replication/AOF. */
+aux = createStringObject("DEL",3);
+rewriteClientCommandVector(c,2,aux,c->argv[3]);
+decrRefCount(aux);
+由于指定了!copy，因此del是不会被复制到slave的，但是在del命令的代码段并未使用if (!copy)判断
+
+3，在进行了手动cluster failover至slave后，赋值出现问题
+测试脚本
+from rediscluster.client import RedisCluster
+from time import time
+
+startup_nodes = [
+    {'host': '192.168.67.140', 'port': '7002'},
+    {'host': '192.168.67.140', 'port': '7004'},
+]
+
+rc = RedisCluster(startup_nodes=startup_nodes, decode_responses=True)
+
+while True:
+    t = time()
+    for i in range(2048):
+        rc.set(i, i)
+    l = rc.mget(list(range(2048)))
+    duration = time() - t
+    print len(l), "%f ms" % (duration * 1000.0)
+	
+可能是rc2的一些严重内存bug导致，getNodeByQuery()的实现也不是很好，实际上cluster的状态的更新也不是原子的，所以导致了这个bug
+
+
+4，redis在崩溃后无法重启
+=== REDIS BUG REPORT START: Cut & paste starting from here ===
+[1888] 06 Nov 03:08:10.958 # === ASSERTION FAILED OBJECT CONTEXT ===
+[1888] 06 Nov 03:08:10.959 # Object type: 5
+[1888] 06 Nov 03:08:10.959 # Object encoding: 0
+[1888] 06 Nov 03:08:10.959 # Object refcount: 0
+[1888] 06 Nov 03:08:10.959 # === ASSERTION FAILED ===
+[1888] 06 Nov 03:08:10.959 # ==> object.c:309 'a->type == REDIS_STRING && b->type == REDIS_STRING' is not true
+[1888] 06 Nov 03:08:10.959 # (forcing SIGSEGV to print the bug report.)
+[1888] 06 Nov 03:08:10.959 #     Redis 2.6.2 crashed by signal: 11
+[1888] 06 Nov 03:08:10.959 #     Failed assertion: a->type == REDIS_STRING && b->type == REDIS_STRING (object.c:309)
+[1888] 06 Nov 03:08:10.959 # --- STACK TRACE
+/usr/local/bin/redis-server(logStackTrace+0x5e)[0x8084cae]
+/usr/local/bin/redis-server(_redisAssert+0x77)[0x8084b57]
+[0xf57fe40c]
+/usr/local/bin/redis-server(compareStringObjects+0xf5)[0x806a175]
+/usr/local/bin/redis-server(zslInsert+0x9e)[0x8079bce]
+/usr/local/bin/redis-server(rdbLoadObject+0x2cc)[0x806fdcc]
+/usr/local/bin/redis-server(rdbLoad+0x1ca)[0x807066a]
+/usr/local/bin/redis-server(loadDataFromDisk+0x2b)[0x805f19b]
+/usr/local/bin/redis-server(main+0x40d)[0x806002d]
+/lib/i686/cmov/libc.so.6(__libc_start_main+0xe6)[0xb764dca6]
+/usr/local/bin/redis-server[0x8058751]
+（中间部分省略）
+=== REDIS BUG REPORT END. Make sure to include from START to END. ===
+
+jmelloc会莫名其妙的报告无可用内存，在32位系统上如果没有可用内存，那么系统会释放redis占用的内存，导致redis莫名其妙的崩溃
+
+5，在转换一个hash类型数据时导致redis崩溃
+=== REDIS BUG REPORT START: Cut & paste starting from here ===
+[10845] 09 Jun 04:42:08.251 # === ASSERTION FAILED ===
+[10845] 09 Jun 04:42:08.251 # ==> t_hash.c:406 'ret == DICT_OK' is not true
+[10845] 09 Jun 04:42:08.251 # (forcing SIGSEGV to print the bug report.)
+[10845] 09 Jun 04:42:08.251 # Redis 2.5.10 crashed by signal: 11
+[10845] 09 Jun 04:42:08.251 # Failed assertion: ret == DICT_OK (t_hash.c:406)
+[10845] 09 Jun 04:42:08.252 # --- STACK TRACE
+/usr/bin/redis-server(logStackTrace+0x52)[0x438492]
+/usr/bin/redis-server(_redisAssert+0x6f)[0x43764f]
+/lib/x86_64-linux-gnu/libpthread.so.0(+0xfc60)[0x7f1f8cc46c60]
+/usr/bin/redis-server(_redisAssert+0x6f)[0x43764f]
+/usr/bin/redis-server(hashTypeConvertZiplist+0xe0)[0x42fa60]
+/usr/bin/redis-server(hsetCommand+0x34)[0x42fd74]
+/usr/bin/redis-server(call+0x5d)[0x413a9d]
+/usr/bin/redis-server(luaRedisGenericCommand+0x25a)[0x43b8ca]
+/usr/bin/redis-server[0x4423cd]
+/usr/bin/redis-server[0x44b92c]
+/usr/bin/redis-server[0x44289d]
+/usr/bin/redis-server[0x441ae7]
+/usr/bin/redis-server[0x442a52]
+/usr/bin/redis-server(lua_pcall+0x4f)[0x44007f]
+/usr/bin/redis-server(evalGenericCommand+0x1fc)[0x43c7ec]
+/usr/bin/redis-server(call+0x5d)[0x413a9d]
+/usr/bin/redis-server(processCommand+0x375)[0x4157e5]
+/usr/bin/redis-server(processInputBuffer+0x4f)[0x41dfff]
+/usr/bin/redis-server(readQueryFromClient+0xa0)[0x41e110]
+/usr/bin/redis-server(aeProcessEvents+0x136)[0x40fee6]
+/usr/bin/redis-server(aeMain+0x2b)[0x41019b]
+/usr/bin/redis-server(main+0x2a3)[0x416473]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xff)[0x7f1f8c8c0eff]
+/usr/bin/redis-server[0x40f169]
+（中间部分省略）
+=== REDIS BUG REPORT END. Make sure to include from START to END. ===
+
+在redis的2.6版本中，每当hash的域内时一个小的数字，在0到255之间时，会触发这个bug
+
+
+6，在复制环境中，使用Lua脚本批量执行LPUSH/BRPOPLPUSH时的bug
+在主服务器上执行Lua脚本后，复制到slave的RPOP的数量有问题
+https://github.com/antirez/redis/commit/c0d87e0b55e70d5a4b6d92a842870fa638dfef20
+
+7，redis的cluster中节点在执行了特定命令后崩溃
+redis 127.0.0.1:6379> SET foobar test
+OK
+redis 127.0.0.1:6379> MGET foo foobar
+(error) ERR Multi keys request invalid in cluster
+redis 127.0.0.1:6379> GETRANGE foobar 0 1
+(error) MOVED 1650 127.0.0.1:6380
+redis 127.0.0.1:6379> GETRANGE foobar 0 1
+(error) ERR unknown command ''
+redis 127.0.0.1:6379> GETRANGE foobar 0 1
+Could not connect to Redis at 127.0.0.1:6379: Connection refused
+
+8，是用aof持久化时，flush all命令没有记录至aof文件
+在使用flush all命令后，内存使用由87896904降至717616，但是在重启后内存使用达87896824：
+
+[977] 16 Oct 23:12:32 - 0 clients connected (0 slaves), 87896904 bytes in use
+[977] 16 Oct 23:12:32 - Accepted 127.0.0.1:36209
+[977] 16 Oct 23:12:32 * DB saved on disk
+[977] 16 Oct 23:12:33 - Client closed connection
+[977] 16 Oct 23:12:37 - 0 clients connected (0 slaves), 717616 bytes in use
+[977] 16 Oct 23:12:40 # Received SIGTERM, scheduling shutdown...
+[977] 16 Oct 23:12:40 # User requested shutdown...
+[977] 16 Oct 23:12:40 * Calling fsync() on the AOF file.
+[977] 16 Oct 23:12:40 # Redis is now ready to exit, bye bye...
+
+( system reboot )
+
+[985] 16 Oct 23:13:05 * Server started, Redis version 2.4.0
+[985] 16 Oct 23:13:05 * DB saved on disk
+[985] 16 Oct 23:13:36 * DB loaded from append only file: 31 seconds
+[985] 16 Oct 23:13:36 * The server is now ready to accept connections on port 10001
+[985] 16 Oct 23:13:37 - DB 0: 820 keys (0 volatile) in 1024 slots HT.
+[985] 16 Oct 23:13:37 - 0 clients connected (0 slaves), 87896824 bytes in use
+
+9，如果给有序集合设定了超时时间，但是在使用zadd后先前所有的元素都被删除
+$redis-cli
+redis 127.0.0.1:6379> ZADD KEY 1.0 VALUE1
+(integer) 1
+redis 127.0.0.1:6379> ZADD KEY 2.0 VALUE2
+(integer) 1
+redis 127.0.0.1:6379> ZADD KEY 3.0 VALUE3
+(integer) 1
+redis 127.0.0.1:6379> ZREVRANGE KEY 0 -1 WITHSCORES
+1) "VALUE3"
+2) "3"
+3) "VALUE2"
+4) "2"
+5) "VALUE1"
+6) "1"
+redis 127.0.0.1:6379> EXPIRE KEY 200000
+(integer) 1
+redis 127.0.0.1:6379> TTL KEY
+(integer) 199995
+redis 127.0.0.1:6379> ZREVRANGE KEY 0 -1 WITHSCORES
+1) "VALUE3"
+2) "3"
+3) "VALUE2"
+4) "2"
+5) "VALUE1"
+6) "1"
+redis 127.0.0.1:6379> ZADD KEY 4.0 VALUE4
+(integer) 1
+redis 127.0.0.1:6379> ZREVRANGE KEY 0 -1 WITHSCORES
+1) "VALUE4"
+2) "4"
+redis 127.0.0.1:6379>
+
+10，从服务器会突然和主服务器断开连接，在重新同步时崩溃
+[19576] 03 Sep 17:44:44 * Connecting to MASTER...
+[19576] 03 Sep 17:44:44 * MASTER <-> SLAVE sync started
+[19576] 03 Sep 17:44:44 * Non blocking connect for SYNC fired the event.
+[19576] 03 Sep 17:44:59 * MASTER <-> SLAVE sync: receiving 443943674 bytes from master
+[19576] 03 Sep 17:45:18 * MASTER <-> SLAVE sync: Loading DB in memory
+[19576] 03 Sep 17:45:19 # === REDIS BUG REPORT START: Cut & paste starting from here ===
+[19576] 03 Sep 17:45:19 # Redis 2.4.15 crashed by signal: 11
+[19576] 03 Sep 17:45:19 # Failed assertion: (:0)
+[19576] 03 Sep 17:45:19 # --- STACK TRACE
+[19576] 03 Sep 17:45:19 # ./redis-server(decrRefCount+0x44) [0x41a3f4]
+[19576] 03 Sep 17:45:19 # ./redis-server(decrRefCount+0x44) [0x41a3f4]
+[19576] 03 Sep 17:45:19 # ./redis-server(_dictClear+0x5d) [0x40e3ad]
+[19576] 03 Sep 17:45:19 # ./redis-server(dictRelease+0xd) [0x40e42d]
+[19576] 03 Sep 17:45:19 # ./redis-server(freeZsetObject+0x54) [0x41a334]
+[19576] 03 Sep 17:45:19 # ./redis-server(decrRefCount+0xc5) [0x41a475]
+[19576] 03 Sep 17:45:19 # ./redis-server(_dictClear+0x74) [0x40e3c4]
+[19576] 03 Sep 17:45:19 # ./redis-server(dictEmpty+0xd) [0x40e83d]
+[19576] 03 Sep 17:45:19 # ./redis-server(emptyDb+0x34) [0x41b194]
+[19576] 03 Sep 17:45:19 # ./redis-server(readSyncBulkPayload+0x13a) [0x41ce1a]
+[19576] 03 Sep 17:45:19 # ./redis-server(aeProcessEvents+0x135) [0x40c945]
+[19576] 03 Sep 17:45:19 # ./redis-server(aeMain+0x2e) [0x40cbbe]
+[19576] 03 Sep 17:45:19 # ./redis-server(main+0x14e) [0x40bb2e]
+[19576] 03 Sep 17:45:19 # /lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xed) [0x7f8679a5c30d]
+[19576] 03 Sep 17:45:19 # ./redis-server() [0x40bc99]
+[19576] 03 Sep 17:45:19 # --- INFO OUTPUT
+[19576] 03 Sep 17:45:19 # redis_version:2.4.15
+redis_git_sha1:00000000
+redis_git_dirty:0
+arch_bits:64
+multiplexing_api:epoll
+gcc_version:4.6.1
+process_id:19576
+uptime_in_seconds:3566458
+uptime_in_days:41
+lru_clock:450983
+used_cpu_sys:323013.62
+used_cpu_user:375770.50
+used_cpu_sys_children:0.00
+used_cpu_user_children:0.00
+connected_clients:128
+connected_slaves:0
+client_longest_output_list:0
+client_biggest_input_buf:0
+blocked_clients:0
+used_memory:1851872856
+used_memory_human:1.72G
+used_memory_rss:2196688896
+used_memory_peak:2103892936
+used_memory_peak_human:1.96G
+mem_fragmentation_ratio:1.19
+mem_allocator:jemalloc-3.0.0
+loading:0
+aof_enabled:0
+changes_since_last_save:24137633701
+bgsave_in_progress:0
+last_save_time:1343120661
+bgrewriteaof_in_progress:0
+total_connections_received:10875
+total_commands_processed:20813165875
+expired_keys:0
+evicted_keys:0
+keyspace_hits:13030082066
+keyspace_misses:27780054
+pubsub_channels:0
+pubsub_patterns:0
+latest_fork_usec:0
+vm_enabled:0
+role:slave
+master_host:10.42.42.42
+master_port:6379
+master_link_status:down
+master_last_io_seconds_ago:-1
+master_sync_in_progress:1
+master_sync_left_bytes:0
+master_sync_last_io_seconds_ago:4
+master_link_down_since_seconds:36
+db0:keys=753583,expires=801276
+
+（中间部分省略）
+[19576] 03 Sep 17:45:19 # 
+=== REDIS BUG REPORT END. Make sure to include from START to END. ===
+
+在复制开始后，slave清空了所有的数据，并开始和master同步，但是同步时出发了一个有关sorted set的bug导致崩溃

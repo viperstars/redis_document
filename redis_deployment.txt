@@ -1,0 +1,392 @@
+安装前的准备工作
+1，建议安装在linux操作系统上
+2，修改/etc/sysctl.conf中vm.overcommit_memory = 1，表示内核允许分配所有的物理内存，而不管当前的内存状态如何
+sysctl -w vm.overcommit_memory=1或echo 1 > /proc/sys/vm/overcommit_memory  
+vim /etc/sysctl.conf
+vm.overcommit_memory = 1
+3，确保关闭了linux的transparent huge pages，通过echo never > /sys/kernel/mm/transparent_hugepage/enabled来实现
+echo never > /sys/kernel/mm/transparent_hugepage/enabled
+4，准备一些swap空间，建议是和内存一样大，否则redis可能会崩溃或是被oom杀死
+5，配置一个明确的maxmemory值，否则redis可能会在接近系统最大内存时出错
+6，如果在一个写操作频繁的场景使用redis，并使用rdb或者aof时，redis可能会使用平时两倍的内存
+7，当使用了daemontools时，将daemonize设置为no
+8，如果将持久化特性关闭时，redis仍然需要在有主从复制时使用rdb文件
+9，在使用复制时，确保master开启了持久化存储，或者关闭在奔溃后自动重启的功能，如果master开启时载入空的文件，那么slave会抹掉所有数据
+
+版本选择
+目前最新的稳定版为3.0，最后支持的版本为2.8.19，建议选择2.8.19，因为3.0版本还有不少Bug，并且3.0的很多新特性并不是需要关注的重点
+
+redis的安装
+1，下载
+wget http://download.redis.io/releases/redis-2.8.19.tar.gz
+2，解压
+tar xzf redis-2.8.19.tar.gz
+cd redis-2.8.19
+3，不需要./configure
+make
+4，启动服务
+./src/redis-server
+5，使用客户端工具连接
+./src/redis-cli
+
+启动方式
+1，或直接指定配置文件
+./redis-server /home/redis/redis.conf
+2，也可以通过提供的sysV脚本来启动
+cp utils/redis_init_script /etc/init.d/redis
+chmod 755 /etc/init.d/redis
+/etc/init.d/redis可以接受两个参数，分别是start和stop
+
+phpredis的安装
+wget https://codeload.github.com/phpredis/phpredis/zip/develop
+wget http://pecl.php.net/get/igbinary
+
+先安装igbinary
+tar xf igbinary-1.2.1.tgz
+cd igbinary-1.2.1
+/data/webserver/php/bin/phpize
+./configure --with-php-config=/data/webserver/php/bin/php-config
+make && make install
+
+再安装phpredis
+unzip phpredis-develop.zip
+cd phpredis-develop
+/data/webserver/php/bin/phpize
+./configure --enable-redis-igbinary --with-php-config=/data/webserver/php/bin/php-config
+make && make install
+
+给php.ini增加extensions="redis.so"
+
+新建测试页面
+<?php
+$redis = new Redis();
+$redis->connect('127.0.0.1',6379);
+$redis->set('haha','www.viperstars.com');
+echo 'haha:'.$redis->get('haha');
+echo 'br>';
+echo 'hehe:'.$redis->get('hehe');
+?>
+
+测试
+redis的很多问题都是由于内存的问题导致的，所以在运行redis之前可以对将要分配的内存大小做一个测试
+./redis-server --test-memory memory-size
+
+可以在server上使用
+./redis-cli --intrinsic-latency seconds 来检测系统最小延迟
+
+可以在客户端上使用
+./redis-cli --latency -h `host` -p `port` 来检测最小延迟
+
+runtest可以对redis的各种功能进行测试
+./runtest
+
+redis会内置一个测试工具redis-benchmark，可以模拟N个客户端同时发送M个请求（类似apache的ab工具），以下是使用方法：可以通过-t来指定测试的命令：
+例如：redis-benchmark -t set,lpush -n 100000 -q
+
+也可以通过指定脚本来测试：
+例如：redis-benchmark -n 100000 -q script load "redis.call('set','foo','bar')"
+
+可以通过-r来指定使用一定数量的随机值完成测试
+例如：redis-benchmark -t set -r 100000 -n 1000000
+
+可以通过pipeline来测试，由于pipeline是将所有的请求一次发送，所以相对来说性能更好
+redis-benchmark -n 1000000 -t set,get -P 16 -q
+
+配置文件
+################################## INCLUDES ###################################
+
+# include /path/to/local.conf
+# include /path/to/other.conf
+
+################################ GENERAL  #####################################
+
+daemonize no
+
+pidfile （pid文件路径）
+
+port 6379
+
+tcp-backlog 511
+
+bind （bind的ip地址）
+
+# unixsocket /tmp/redis.sock
+# unixsocketperm 700
+
+timeout 0
+
+tcp-keepalive 0
+
+loglevel notice
+
+logfile "（日志文件路径）"
+
+# syslog-enabled no
+
+# syslog-ident redis
+
+# syslog-facility local0
+
+databases 16
+
+################################ SNAPSHOTTING  ################################
+
+save 900 1
+save 300 10
+save 60 10000
+
+stop-writes-on-bgsave-error yes
+
+rdbcompression yes
+
+rdbchecksum yes
+
+dbfilename dump.rdb
+dir ./
+
+################################# REPLICATION #################################
+
+# slaveof <masterip> <masterport>
+
+# masterauth <master-password>
+
+slave-serve-stale-data yes
+
+slave-read-only yes
+
+repl-diskless-sync no
+
+repl-diskless-sync-delay 5
+
+# repl-ping-slave-period 10
+
+# repl-timeout 60
+
+repl-disable-tcp-nodelay no
+
+# repl-backlog-size 1mb
+
+# repl-backlog-ttl 3600
+
+slave-priority 100
+
+# min-slaves-to-write 3
+# min-slaves-max-lag 10
+
+################################## SECURITY ###################################
+
+# requirepass foobared
+
+# rename-command CONFIG b840fc02d524045429941cc15f59e41cb7be6c52
+
+################################### LIMITS ####################################
+
+# maxclients 10000
+
+maxmemory （最大内存大小<bytes>）
+
+# maxmemory-policy volatile-lru
+
+# maxmemory-samples 3
+
+############################## APPEND ONLY MODE ###############################
+
+appendonly no
+
+appendfilename "appendonly.aof"
+
+appendfsync everysec
+
+no-appendfsync-on-rewrite no
+
+auto-aof-rewrite-percentage 100
+auto-aof-rewrite-min-size 64mb
+
+aof-load-truncated no
+
+################################ LUA SCRIPTING  ###############################
+
+lua-time-limit 5000
+
+################################## SLOW LOG ###################################
+
+slowlog-log-slower-than 10000
+
+slowlog-max-len 128
+
+################################ LATENCY MONITOR ##############################
+
+latency-monitor-threshold 0
+
+############################# Event notification ##############################
+
+notify-keyspace-events ""
+
+############################### ADVANCED CONFIG ###############################
+
+hash-max-ziplist-entries 512
+hash-max-ziplist-value 64
+
+list-max-ziplist-entries 512
+list-max-ziplist-value 64
+
+set-max-intset-entries 512
+
+zset-max-ziplist-entries 128
+zset-max-ziplist-value 64
+
+hll-sparse-max-bytes 3000
+
+activerehashing yes
+
+client-output-buffer-limit normal 0 0 0
+client-output-buffer-limit slave 256mb 64mb 60
+client-output-buffer-limit pubsub 32mb 8mb 60
+
+hz 10
+
+aof-rewrite-incremental-fsync yes
+
+redis状态和监控
+可以通过自带的redis-cli来输出redis的运行状态及详细信息
+./redis-cli info
+# Server
+redis_version:2.8.19
+redis_git_sha1:00000000
+redis_git_dirty:0
+redis_build_id:c1e9de98e9841a9c
+redis_mode:standalone
+os:Linux 2.6.32-431.el6.x86_64 x86_64
+arch_bits:64
+multiplexing_api:epoll
+gcc_version:4.4.7
+process_id:4016
+run_id:de67741186a587385941cecd308ae8a074d85e5e
+tcp_port:6379
+uptime_in_seconds:8680
+uptime_in_days:0
+hz:10
+lru_clock:2928983
+config_file:/home/redis/redis.conf
+
+# Clients
+connected_clients:2
+client_longest_output_list:0
+client_biggest_input_buf:0
+blocked_clients:0
+
+# Memory
+used_memory:24347744
+used_memory_human:23.22M
+used_memory_rss:34811904
+used_memory_peak:26455736
+used_memory_peak_human:25.23M
+used_memory_lua:35840
+mem_fragmentation_ratio:1.43
+mem_allocator:jemalloc-3.6.0
+
+# Persistence
+loading:0
+rdb_changes_since_last_save:0
+rdb_bgsave_in_progress:0
+rdb_last_save_time:1428983663
+rdb_last_bgsave_status:ok
+rdb_last_bgsave_time_sec:-1
+rdb_current_bgsave_time_sec:-1
+aof_enabled:0
+aof_rewrite_in_progress:0
+aof_rewrite_scheduled:0
+aof_last_rewrite_time_sec:-1
+aof_current_rewrite_time_sec:-1
+aof_last_bgrewrite_status:ok
+aof_last_write_status:ok
+
+# Stats
+total_connections_received:121
+total_commands_processed:59
+instantaneous_ops_per_sec:0
+total_net_input_bytes:8940
+total_net_output_bytes:137126
+instantaneous_input_kbps:0.00
+instantaneous_output_kbps:0.00
+rejected_connections:0
+sync_full:0
+sync_partial_ok:0
+sync_partial_err:0
+expired_keys:0
+evicted_keys:0
+keyspace_hits:0
+keyspace_misses:0
+pubsub_channels:0
+pubsub_patterns:0
+latest_fork_usec:0
+
+# Replication
+role:slave
+master_host:192.168.1.116
+master_port:6000
+master_link_status:down
+master_last_io_seconds_ago:-1
+master_sync_in_progress:0
+slave_repl_offset:1
+master_link_down_since_seconds:1428992343
+slave_priority:100
+slave_read_only:1
+connected_slaves:0
+master_repl_offset:0
+repl_backlog_active:0
+repl_backlog_size:1048576
+repl_backlog_first_byte_offset:0
+repl_backlog_histlen:0
+
+# CPU
+used_cpu_sys:15.10
+used_cpu_user:5.29
+used_cpu_sys_children:0.00
+used_cpu_user_children:0.00
+
+# Keyspace
+db0:keys=101035,expires=0,avg_ttl=0
+
+如果使用zabbix监控，那么可以定义以下key
+UserParameter=redis_status[*],( redis的工作目录 )/redis-cli info | grep $1 | awk -F\: '{print $$2}'
+
+影响Redis性能的因素
+有几个因素直接决定Redis的性能。这几个因素能够改变基准测试的结果， 所以我们必须注意到。一般情况下，Redis默认参数已经可以提供足够的性能， 不需要调优。
+
+1，网络带宽和延迟通常是最大短板。建议在基准测试之前使用ping，来检查服务端到客户端的延迟。根据带宽可以计算出最大吞吐量， 比如将4 KB的字符串存入Redis，
+吞吐量是100000q/s，那么实际需要3.2 Gbits/s的带宽，所以需要10 GBits/s网络连接，1 Gbits/s 是不够的。在很多线上服务中，Redis吞吐会先被网络带宽限制，而不是 CPU。 
+为了达到高吞吐量突破TCP/IP 限制，最好采用10 Gbits/s 的网卡， 或者多个1 Gbits/s 网卡。
+
+2，CPU是另外一个重要的影响因素，由于是单线程模型，Redis更喜欢大缓存快速CPU， 而不是多核。这种场景下，比较推荐 Intel CPU。
+AMD CPU可能只有Intel CPU的一半性能（通过对 Nehalem EP/Westmere EP/Sandy 平台的对比）。 当其他条件相当时候，CPU 就成了redis-benchmark的限制因素。
+
+3，在小对象存取时候，内存速度和带宽看上去不是很重要，但是对大对象（> 10 KB），它就变得重要起来。不过通常情况，不至于为了优化Redis而购买更高性能的内存模块。
+
+4，Redis 在VM上会变慢。虚拟化对普通操作会有额外的消耗，Redis对系统调用和网络终端不会有太多的overhead。建议把Redis运行在物理机器上，特别是当你很在意延迟时候。
+在最先进的虚拟化设备（VMWare）上面，redis-benchmark 的测试结果比物理机器上慢了一倍，很多 CPU 时间被消费在系统调用和中断上面。
+
+5，如果服务器和客户端都运行在同一个机器上面，那么TCP/IP loopback和unix domain sockets都可以使用。对Linux来说，使用unix socket可以比TCP/IP loopback快50%。 
+默认redis-benchmark是使用TCP/IP loopback。当大量使用 pipelining 时候，unix domain sockets的优势就不那么明显了。
+
+6，当使用网络连接时，并且以太网网数据包在1500 bytes以下时， 将多条命令包装成pipelining可以大大提高效率。事实上，处理10 bytes，100 bytes，1000 bytes的请求时候，吞吐量是差不多的。
+
+7，在多CPU服务器上面，Redis的性能还依赖NUMA配置和 处理器绑定位置。最明显的影响是redis-benchmark会随机使用CPU。为了获得精准的结果，
+需要使用固定处理器工具（在 Linux 上可以使用 taskset 或 numactl）。最有效的办法是将客户端和服务端分离到两个不同的CPU来高校使用三级缓存。 
+这里有一些使用4 KB数据SET的基准测试，针对三种CPU（AMD Istanbul, Intel Nehalem EX，和 Intel Westmere）使用不同的配置。请注意，这不是针对 CPU 的测试。
+
+8，客户端的连接数也是一个重要的因素。得益于epoll/kqueue，Redis的事件循环具有相当可扩展性。Redis已经在超过60000连接下测试过， 仍然可以维持50000q/s。
+一条经验法则是，30000的连接数只有100连接的一半吞吐量。 
+
+9，还可以通过调优NIC来获得更高性能。最高性能在绑定Rx/Tx 队列和CPU内核下面才能达到，还需要开启 RPS（网卡中断负载均衡）。Jumbo frames还可以在大对象使用时候获得更高性能。
+
+10，在不同平台下面，Redis可以被编译成不同的内存分配方式（libc malloc, jemalloc, tcmalloc），他们在不同速度、连续和非连续片段下会有不一样的表现。 
+如果你不是自己编译的Redis，可以使用INFO命令来检查内存分配方式。
+
+由于Redis是单线程的，该如何提高多核CPU的利用率？
+
+CPU不太可能是Redis的瓶颈，一般内存和网络才是主要因素。 例如，使用Redis的管道（pipelining）在liunx系统上运行可以达到500K的RPS(requests per second) ，
+因此，如果您的应用程序主要使用O(N) 或者O(log(N))的 命令，他们几乎不需要使用什么CPU。
+然而，为了最大限度的使用CPU，可以在同一个服务器部署多个Redis的实例，并把他们当作不同的服务器来使用，在某些时候，无论如何一个服务器是不够的，
+所以如果你想使用多个CPU，你可以考虑一下分片（shard） 。在Redis的客户端类库里面，比如RB（Ruby的客户端）和Predis（最常用的PHP客户端之一），
+能够使用一致性哈希（consistent hashing）来处理多个Redis实例。
